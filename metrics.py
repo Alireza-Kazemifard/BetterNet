@@ -1,74 +1,92 @@
 import tensorflow as tf
-from tensorflow.keras.saving import register_keras_serializable
+from keras.saving import register_keras_serializable
 
-smooth = 1e-15
+SMOOTH = 1e-7
 
-@register_keras_serializable(package="builtins")
-def intersection_over_union(y_true, y_pred):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    
-    # Use reshape instead of Flatten layer for Keras 3 compatibility
-    y_true_f = tf.reshape(y_true, [-1])
-    y_pred_f = tf.reshape(y_pred, [-1])
-    
-    intersection = tf.reduce_sum(y_true_f * y_pred_f)
-    union = tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f) - intersection
-    return (intersection + smooth) / (union + smooth)
 
-@register_keras_serializable(package="builtins")
+@register_keras_serializable()
 def dice_coefficient(y_true, y_pred):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    y_true_f = tf.reshape(y_true, [-1])
-    y_pred_f = tf.reshape(y_pred, [-1])
-    
-    intersection = tf.reduce_sum(y_true_f * y_pred_f)
-    return (2. * intersection + smooth) / (tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f) + smooth)
+    y_true = tf.reshape(y_true, [-1])
+    y_pred = tf.reshape(y_pred, [-1])
+    intersection = tf.reduce_sum(y_true * y_pred)
+    return (2.0 * intersection + SMOOTH) / (tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) + SMOOTH)
 
-@register_keras_serializable(package="builtins")
+
+@register_keras_serializable()
 def dice_loss(y_true, y_pred):
     return 1.0 - dice_coefficient(y_true, y_pred)
 
-@register_keras_serializable(package="builtins")
-def binary_crossentropy_dice_loss(y_true, y_pred):
-    bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
-    dice = dice_loss(y_true, y_pred)
-    return bce + dice
 
-@register_keras_serializable(package="builtins")
-def weighted_f_score(y_true, y_pred, beta=2):
+@register_keras_serializable()
+def intersection_over_union(y_true, y_pred):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    y_true_f = tf.reshape(y_true, [-1])
-    y_pred_f = tf.reshape(y_pred, [-1])
-    
-    true_positive = tf.reduce_sum(y_true_f * y_pred_f)
-    false_positive = tf.reduce_sum((1 - y_true_f) * y_pred_f)
-    false_negative = tf.reduce_sum(y_true_f * (1 - y_pred_f))
-    
-    precision = true_positive / (true_positive + false_positive + smooth)
-    recall = true_positive / (true_positive + false_negative + smooth)
-    
-    f_score = (1 + beta**2) * precision * recall / ((beta**2 * precision) + recall + smooth)
-    return f_score
+    y_true = tf.reshape(y_true, [-1])
+    y_pred = tf.reshape(y_pred, [-1])
+    intersection = tf.reduce_sum(y_true * y_pred)
+    union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) - intersection
+    return (intersection + SMOOTH) / (union + SMOOTH)
 
-@register_keras_serializable(package="builtins")
-def s_score(y_true, y_pred, alpha=0.5):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    # Simplified for monitoring (Full S-measure requires CPU/Numpy)
-    return dice_coefficient(y_true, y_pred)
 
-@register_keras_serializable(package="builtins")
-def e_score(y_true, y_pred):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    # Simplified for monitoring
-    return intersection_over_union(y_true, y_pred)
-
-@register_keras_serializable(package="builtins")
+@register_keras_serializable()
 def mean_absolute_error(y_true, y_pred):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    return tf.reduce_mean(tf.abs(y_pred - y_true))
+    return tf.reduce_mean(tf.abs(y_true - y_pred))
+
+
+@register_keras_serializable()
+def weighted_f_score(y_true, y_pred, beta=0.3):
+    # simple weighted F-beta (approx; paper uses Fan toolbox)
+    y_true = tf.cast(y_true > 0.5, tf.float32)
+    y_pred = tf.cast(y_pred > 0.5, tf.float32)
+
+    tp = tf.reduce_sum(y_true * y_pred)
+    fp = tf.reduce_sum((1 - y_true) * y_pred)
+    fn = tf.reduce_sum(y_true * (1 - y_pred))
+
+    precision = tp / (tp + fp + SMOOTH)
+    recall = tp / (tp + fn + SMOOTH)
+    beta2 = beta * beta
+    return (1 + beta2) * precision * recall / (beta2 * precision + recall + SMOOTH)
+
+
+@register_keras_serializable()
+def s_score(y_true, y_pred):
+    # lightweight proxy (NOT the full Fan toolbox S-measure)
+    # keeps behavior closer to old repo than the simplified new version
+    return dice_coefficient(y_true, y_pred)
+
+
+@register_keras_serializable()
+def e_score(y_true, y_pred):
+    # lightweight proxy (NOT the full Fan toolbox E-measure)
+    return intersection_over_union(y_true, y_pred)
+
+
+@register_keras_serializable()
+def max_e_score(y_true, y_pred):
+    # sweep thresholds to approximate maxE
+    y_true = tf.cast(y_true > 0.5, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+
+    thresholds = tf.linspace(0.0, 1.0, 21)
+    best = tf.constant(0.0, dtype=tf.float32)
+
+    for t in tf.unstack(thresholds):
+        yp = tf.cast(y_pred > t, tf.float32)
+        best = tf.maximum(best, intersection_over_union(y_true, yp))
+
+    return best
+
+
+@register_keras_serializable()
+def binary_crossentropy_dice_loss(y_true, y_pred, alpha=0.5):
+    # matches paper description: L = alpha*BCE + (1-alpha)*DiceLoss
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    bce = tf.reduce_mean(tf.keras.losses.binary_crossentropy(y_true, y_pred))
+    dl = dice_loss(y_true, y_pred)
+    return alpha * bce + (1.0 - alpha) * dl
