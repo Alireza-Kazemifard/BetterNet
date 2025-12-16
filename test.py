@@ -1,113 +1,73 @@
+
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
-import time
-import numpy as np
-import tensorflow as tf
-import cv2
-from operator import add
-from metrics import intersection_over_union, dice_coefficient, weighted_f_score, s_score, e_score, max_e_score, mean_absolute_error
-from utils import create_directory, load_model
-from data import load_test_dataset
 import argparse
-
-def compute_metrics(y_true, y_pred):
-    y_pred = y_pred > 0.5
-    y_pred_flat = y_pred.reshape(-1).astype(np.uint8)
-
-    y_true = y_true > 0.5
-    y_true_flat = y_true.reshape(-1).astype(np.uint8)
-
-    iou_score = intersection_over_union(y_true_flat, y_pred_flat).numpy()
-    dice_score = dice_coefficient(y_true_flat, y_pred_flat).numpy()
-    f_score = weighted_f_score(y_true_flat, y_pred_flat)
-    s_measure_score = s_score(y_true_flat, y_pred_flat)
-    e_measure_score = e_score(y_true_flat, y_pred_flat)
-    max_e_measure_score = max_e_score(y_true_flat, y_pred_flat)
-    mae_score = mean_absolute_error(y_true_flat, y_pred_flat)
-
-    return [iou_score, dice_score, f_score, s_measure_score, e_measure_score, max_e_measure_score, mae_score]
-
-def parse_mask(mask):
-    mask = np.squeeze(mask)
-    mask = np.stack([mask, mask, mask], axis=-1)
-    return mask
+import numpy as np
+import pandas as pd
+import cv2
+import tensorflow as tf
+from tqdm import tqdm
+from data import load_data
+from utils import load_model, create_directory
+from metrics import *
 
 if __name__ == "__main__":
-    np.random.seed(42)
-    tf.random.set_seed(42)
-
-    parser = argparse.ArgumentParser(description='Test model on a dataset.')
-    parser.add_argument('--dataset', type=str, required=True, help='Name of the dataset directory in the "Dataset" folder.')
-    parser.add_argument('--fulltest', action='store_true', help='Test on the full dataset instead of loading from val.txt')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset_path", type=str, required=True)
+    parser.add_argument("--model_path", type=str, required=True)
+    parser.add_argument("--save_dir", type=str, required=True)
     args = parser.parse_args()
 
-    dataset_name = args.dataset
-    fulltest = args.fulltest
-    print(f"Testing on {dataset_name}")
+    create_directory(args.save_dir)
+    print(f"Loading Model from {args.model_path}...")
+    model = load_model(args.model_path)
 
-    dataset_path = os.path.join("Dataset", dataset_name)
-    
-    test_images, test_masks = load_test_dataset(dataset_path, fulltest)
+    # Load images directly for testing
+    from glob import glob
+    test_x = sorted(glob(os.path.join(args.dataset_path, "images", "*")))
+    test_y = sorted(glob(os.path.join(args.dataset_path, "masks", "*")))
+    print(f"Testing on {len(test_x)} images.")
 
-    image_size = (224, 224)
+    metrics_score = [0.0] * 3 # IoU, Dice, MAE
+    time_taken = []
 
-    model_path = f"model/model.keras"
-    model = load_model(model_path)
+    for i, (x, y) in tqdm(enumerate(zip(test_x, test_y)), total=len(test_x)):
+        name = os.path.split(x)[1].split(".")[0]
+        
+        image = cv2.imread(x, cv2.IMREAD_COLOR)
+        x_img = cv2.resize(image, (256, 256)) / 255.0
+        x_img = np.expand_dims(x_img, axis=0)
 
-    dummy_image = np.zeros((1, 224, 224, 3))
-    _ = model.predict(dummy_image)
+        mask = cv2.imread(y, cv2.IMREAD_GRAYSCALE)
+        mask = cv2.resize(mask, (256, 256)) / 255.0
+        mask = np.expand_dims(mask, axis=-1).astype(np.float32)
 
-    metrics_scores = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    inference_times = []
+        start = os.times()[4]
+        y_pred = model.predict(x_img, verbose=0)[0]
+        time_taken.append(os.times()[4] - start)
 
-    for i, (image_path, mask_path) in enumerate(zip(test_images, test_masks)):
-        name = os.path.basename(mask_path).split(".")[0]
-    
-        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-        if image is None:
-            print(f"Failed to load image: {image_path}. Skipping.")
-            continue
-        image = cv2.resize(image, image_size)
-        original_image = image.copy()
-        image = image / 255.0
-        image = np.expand_dims(image, axis=0).astype(np.float32)
-    
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            print(f"Failed to load mask: {mask_path}. Skipping.")
-            continue
-        mask = cv2.resize(mask, image_size)
-        original_mask = mask.copy()
-        mask = np.expand_dims(mask, axis=0) / 255.0
-        mask = mask.astype(np.float32)
-    
-        start_time = time.time()
-        predicted_mask = model.predict(image)
-        inference_time = time.time() - start_time
-        inference_times.append(inference_time)
-        print(f"{name}: {inference_time:1.5f}")
-    
-        scores = compute_metrics(mask, predicted_mask)
-        metrics_scores = list(map(add, metrics_scores, scores))
-    
-        predicted_mask = (predicted_mask[0] > 0.5) * 255
-        predicted_mask = np.array(predicted_mask, dtype=np.uint8)
-    
-        original_mask = parse_mask(original_mask)
-        predicted_mask = parse_mask(predicted_mask)
-        separator_line = np.ones((image_size[0], 10, 3)) * 255
-    
-        concatenated_images = np.concatenate([original_image, separator_line, original_mask, separator_line, predicted_mask], axis=1)
-        cv2.imwrite(f"results/{name}.png", concatenated_images)
-    
-    average_scores = [score_sum / len(test_images) for score_sum in metrics_scores]
-    metric_labels = ["mIoU", "mDice", "Fw", "Sm", "Em", "maxEm", "MAE"]
-    
-    print("\nAverage Scores:")
-    for label, score in zip(metric_labels, average_scores):
-        print(f"{label}: {score:1.4f}")
-    
-    mean_inference_time = np.mean(inference_times)
-    mean_fps = 1 / mean_inference_time
-    print(f"Mean FPS: {mean_fps}")
+        # Save Image
+        y_pred_uint8 = (y_pred * 255).astype(np.uint8)
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        
+        final_img = np.concatenate([
+            cv2.resize(image, (256, 256)), 
+            np.ones((256, 10, 3))*255,
+            cv2.cvtColor(mask_uint8, cv2.COLOR_GRAY2BGR),
+            np.ones((256, 10, 3))*255,
+            cv2.cvtColor(y_pred_uint8, cv2.COLOR_GRAY2BGR)
+        ], axis=1)
+        cv2.imwrite(f"{args.save_dir}/{name}.png", final_img)
+
+        metrics_score[0] += intersection_over_union(mask, y_pred)
+        metrics_score[1] += dice_coefficient(mask, y_pred)
+        metrics_score[2] += mean_absolute_error(mask, y_pred)
+
+    mean_fps = 1.0 / np.mean(time_taken)
+    print(f"mDice: {metrics_score[1]/len(test_x):.4f} | FPS: {mean_fps:.2f}")
+
+    pd.DataFrame([{
+        "mIoU": metrics_score[0]/len(test_x),
+        "mDice": metrics_score[1]/len(test_x),
+        "MAE": metrics_score[2]/len(test_x),
+        "FPS": mean_fps
+    }]).to_csv(f"{args.save_dir}/results.csv", index=False)
