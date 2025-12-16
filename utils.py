@@ -1,32 +1,29 @@
+# --- START OF FILE utils.py ---
 import os
-import json
-from sklearn.utils import shuffle
 import tensorflow as tf
 from tensorflow.keras.utils import CustomObjectScope
-from tensorflow.keras.metrics import Recall, Precision, MeanIoU
-from tensorflow.keras.optimizers import Adam
-from metrics import intersection_over_union, dice_coefficient, dice_loss, binary_crossentropy_dice_loss
+from metrics import (intersection_over_union, dice_coefficient, dice_loss, 
+                     binary_crossentropy_dice_loss, weighted_f_score, 
+                     s_score, e_score, mean_absolute_error)
 
 def create_directory(directory_path):
-    """ Create a directory. """
     try:
         if not os.path.exists(directory_path):
             os.makedirs(directory_path)
     except OSError:
         print(f"Error: creating directory with name {directory_path}")
 
-def shuffle_data(features, labels):
-    """ Shuffle the data. """
-    shuffled_features, shuffled_labels = shuffle(features, labels, random_state=42)
-    return shuffled_features, shuffled_labels
-
 def load_trained_model(model_path):
-    """ Load the saved model with custom metrics/losses. """
     with CustomObjectScope({
             'intersection_over_union': intersection_over_union,
             'dice_coefficient': dice_coefficient,
             'dice_loss': dice_loss,
-            'binary_crossentropy_dice_loss': binary_crossentropy_dice_loss
+            'binary_crossentropy_dice_loss': binary_crossentropy_dice_loss,
+            'weighted_f_score': weighted_f_score,
+            's_score': s_score,
+            'e_score': e_score,
+            'mean_absolute_error': mean_absolute_error
         }):
         loaded_model = tf.keras.models.load_model(model_path)
+        print("✅ Model loaded successfully with custom metrics.")
         return loaded_model
