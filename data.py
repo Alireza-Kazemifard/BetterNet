@@ -6,25 +6,43 @@ from sklearn.model_selection import train_test_split
 import tensorflow as tf
 from glob import glob
 
-
 IMAGE_HEIGHT = 224
 IMAGE_WIDTH = 224
 
-def load_data(dataset_path, split=0.1):
+def load_data(dataset_paths, split=0.1):
+    """
+    Load data from multiple dataset paths (Combined Training Strategy).
+    dataset_paths: list of strings, e.g., ["Dataset/Kvasir-SEG", "Dataset/CVC-ClinicDB"]
+    """
+    images = []
+    masks = []
+
+    if isinstance(dataset_paths, str):
+        dataset_paths = [dataset_paths]
+
+    for path in dataset_paths:
+        curr_images = sorted(glob(os.path.join(path, "images", "*")))
+        curr_masks = sorted(glob(os.path.join(path, "masks", "*")))
+        
+        curr_images = [x for x in curr_images if x.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+        curr_masks = [x for x in curr_masks if x.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+
+        if len(curr_images) != len(curr_masks):
+            print(f"Warning: Mismatch in {path}. Images: {len(curr_images)}, Masks: {len(curr_masks)}")
+        
+        images.extend(curr_images)
+        masks.extend(curr_masks)
+
+    print(f"Total Combined Images: {len(images)}")
+
+  
+    train_x, valid_x, train_y, valid_y = train_test_split(images, masks, test_size=split, random_state=42)
     
-    images = sorted(glob(os.path.join(dataset_path, "images", "*")))
-    masks = sorted(glob(os.path.join(dataset_path, "masks", "*")))
-    
-    # Split
-    train_x, test_x, train_y, test_y = train_test_split(images, masks, test_size=split, random_state=42)
-    train_x, valid_x, train_y, valid_y = train_test_split(train_x, train_y, test_size=split, random_state=42)
-    
-    return (train_x, train_y), (valid_x, valid_y), (test_x, test_y)
+    return (train_x, train_y), (valid_x, valid_y)
 
 def read_image(path):
     path = path.decode()
     x = cv2.imread(path, cv2.IMREAD_COLOR)
-    
     x = cv2.resize(x, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
     x = x / 255.0
     return x.astype(np.float32)
@@ -32,12 +50,10 @@ def read_image(path):
 def read_mask(path):
     path = path.decode()
     x = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-    
-    x = cv2.resize(x, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4) 
+    x = cv2.resize(x, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
     x = x / 255.0
     x = np.expand_dims(x, axis=-1)
-    
-    x = np.where(x > 0.5, 1.0, 0.0)
+    x = np.where(x > 0.5, 1.0, 0.0) # Binarization
     return x.astype(np.float32)
 
 def tf_parse(x, y):
@@ -56,7 +72,6 @@ def tf_dataset(X, Y, batch_size=8, augment=False):
     
     if augment:
         dataset = dataset.map(lambda x, y: (tf.image.random_flip_left_right(x), tf.image.random_flip_left_right(y)))
-        dataset = dataset.map(lambda x, y: (tf.image.random_flip_up_down(x), tf.image.random_flip_up_down(y)))
         
     dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
