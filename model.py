@@ -1,14 +1,12 @@
-# --- START OF FILE model.py ---
 import tensorflow as tf
 from tensorflow.keras.layers import (Conv2D, Activation, BatchNormalization, UpSampling2D,
                                      Input, Concatenate, Add, Dropout, GlobalAveragePooling2D,
-                                     Reshape, Dense, multiply, Resizing, GlobalMaxPooling2D)
+                                     Reshape, Dense, multiply, Resizing, GlobalMaxPooling2D, Lambda) # Lambda added
 from tensorflow.keras.models import Model
 from tensorflow.keras.applications import EfficientNetB3
 from tensorflow.keras.regularizers import l1_l2
 
 def channel_attention_module(input_feature, ratio=8):
-    
     channel = input_feature.shape[-1]
     shared_dense_one = Dense(channel//ratio, activation='relu', kernel_initializer='he_normal', use_bias=True, bias_initializer='zeros')
     shared_dense_two = Dense(channel, kernel_initializer='he_normal', use_bias=True, bias_initializer='zeros')
@@ -28,10 +26,14 @@ def channel_attention_module(input_feature, ratio=8):
 
 def spatial_attention_module(input_feature):
     kernel_size = 7
-    avg_pool = tf.reduce_mean(input_feature, axis=-1, keepdims=True)
-    max_pool = tf.reduce_max(input_feature, axis=-1, keepdims=True)
-    concat = Concatenate(axis=-1)([avg_pool, max_pool])
     
+    # --- FIX START ---
+    # Wrap raw TF operations in Lambda layers for Keras compatibility
+    avg_pool = Lambda(lambda x: tf.reduce_mean(x, axis=-1, keepdims=True))(input_feature)
+    max_pool = Lambda(lambda x: tf.reduce_max(x, axis=-1, keepdims=True))(input_feature)
+    # --- FIX END ---
+    
+    concat = Concatenate(axis=-1)([avg_pool, max_pool])
     attention_feature = Conv2D(filters=1, kernel_size=kernel_size, strides=1, padding='same', activation='sigmoid', kernel_initializer='he_normal', use_bias=False)(concat)   
     return multiply([input_feature, attention_feature])
 
@@ -54,7 +56,6 @@ def squeeze_excitation_module(input_feature, ratio=16):
     return scale
 
 def residual_block(input_feature, num_filters, dropout_rate=0.5):
-    
     x = input_feature
 
     x = Conv2D(num_filters//4, (1, 1), padding="same", kernel_regularizer=l1_l2(l1=1e-5, l2=1e-4))(x)
@@ -73,8 +74,6 @@ def residual_block(input_feature, num_filters, dropout_rate=0.5):
 
     x = Add()([x, shortcut])
     x = Activation("relu")(x)
-    
-    
     x = squeeze_excitation_module(x)
 
     x = Dropout(dropout_rate)(x)
@@ -83,19 +82,17 @@ def residual_block(input_feature, num_filters, dropout_rate=0.5):
 def decoder_block(input_feature, skip_connection, num_filters, dropout_rate=0.5):
     x = UpSampling2D((2, 2), interpolation='bilinear')(input_feature)
     
-  
     if skip_connection is not None:
         skip_connection = Resizing(x.shape[1], x.shape[2], interpolation='bilinear')(skip_connection)
         x = Concatenate()([x, skip_connection])
 
     x = residual_block(x, num_filters, dropout_rate=dropout_rate)
+
     x = cbam_module(x)
     return x
 
 def BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5):
     inputs = Input(shape=input_shape, name="input_image")
-    
-   
     encoder = EfficientNetB3(input_tensor=inputs, weights="imagenet", include_top=False)
 
     skip_connection_names = [
@@ -108,7 +105,6 @@ def BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5):
     skip_connections = [encoder.get_layer(name).output for name in skip_connection_names]
     x = encoder.output
 
-    
     decoder_filters = [192, 128, 64, 32, 16]
 
     for i, filters in enumerate(decoder_filters):
@@ -116,7 +112,6 @@ def BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5):
             skip_connection = skip_connections[-(i + 2)]
             x = decoder_block(x, skip_connection, filters, dropout_rate=dropout_rate)
 
-    
     x = UpSampling2D((2, 2), interpolation='bilinear')(x)
     x = Conv2D(num_classes, (1, 1), padding="same")(x)
     output = Activation("sigmoid", name="output_image")(x)
