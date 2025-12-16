@@ -1,40 +1,32 @@
-import time
+
 import tensorflow as tf
-from tensorflow.keras.models import load_model
-from metrics import binary_crossentropy_dice_loss
+from tensorflow.python.profiler.model_analyzer import profile
+from tensorflow.python.profiler.option_builder import ProfileOptionBuilder
+from model import BetterNet
 
-def estimate_flops_and_params(model):
-
-    num_params = model.count_params()
-
+def get_flops(model):
     try:
-        from tensorflow.profiler import Profiler
-        with Profiler(display_stdout=False) as profiler:
-            _ = model(tf.random.normal((1, 224, 224, 3)))
-        profile_results = profiler.get_results()
-    except ImportError:
-        print("Profiler not available, using approximate FLOP estimation.")
-        estimated_flops = 2 * num_params
-        gflops = estimated_flops / 1e9
-        print(f"Estimated GFLOPs (based on model size): {gflops:.4f}")
-
-    num_iterations = 100
-    total_inference_time = 0
-
-    for _ in range(num_iterations):
-        start_time = time.time()
-        _ = model.predict(tf.random.normal((1, 224, 224, 3)))
-        end_time = time.time()
-        total_inference_time += end_time - start_time
-
-    avg_inference_time = total_inference_time / num_iterations
-    print(f"Average Inference Time: {avg_inference_time:.4f} seconds")
-
-    return num_params, estimated_flops
+        forward_pass = tf.function(
+            model.call,
+            input_signature=[tf.TensorSpec(shape=(1,) + model.input_shape[1:], dtype=tf.float32)]
+        )
+        graph = forward_pass.get_concrete_function().graph
+        options = ProfileOptionBuilder.float_operation()
+        graph_info = profile(graph, options=options)
+        return graph_info.total_float_ops
+    except Exception as e:
+        print(f"Warning: Could not calculate FLOPs due to TF version mismatch: {e}")
+        return 0
 
 if __name__ == "__main__":
-    trained_model_path = "model/model.keras"
-    loaded_model = load_model(trained_model_path, custom_objects={'binary_crossentropy_dice_loss': binary_crossentropy_dice_loss})  # Pass the custom loss function
-    loaded_model.summary()
-
-    num_model_params, estimated_model_flops = estimate_flops_and_params(loaded_model)
+    input_shape = (256, 256, 3)
+    model = BetterNet(input_shape=input_shape)
+    
+    total_params = model.count_params()
+    flops = get_flops(model)
+    
+    print("-" * 30)
+    print(f"Model: BetterNet")
+    print(f"Total Parameters: {total_params / 1e6:.2f} M")
+    print(f"GFLOPs: {flops / 1e9:.4f} G")
+    print("-" * 30)
