@@ -27,7 +27,7 @@ def channel_attention_module(input_feature, ratio=8):
 def spatial_attention_module(input_feature):
     kernel_size = 7
     
-    # Keras 3 Fix: Wrap TF ops in Lambda
+    # استفاده از Lambda برای سازگاری با Keras های جدید
     avg_pool = Lambda(lambda x: tf.reduce_mean(x, axis=-1, keepdims=True))(input_feature)
     max_pool = Lambda(lambda x: tf.reduce_max(x, axis=-1, keepdims=True))(input_feature)
     
@@ -56,7 +56,7 @@ def squeeze_excitation_module(input_feature, ratio=16):
 def residual_block(input_feature, num_filters, dropout_rate=0.5):
     x = input_feature
 
-    # Paper Exact Architecture: Using l1_l2 regularization
+    # ساختار رزیدوال طبق مقاله
     x = Conv2D(num_filters//4, (1, 1), padding="same", kernel_regularizer=l1_l2(l1=1e-5, l2=1e-4))(x)
     x = BatchNormalization()(x)
     x = Activation("relu")(x)
@@ -73,15 +73,20 @@ def residual_block(input_feature, num_filters, dropout_rate=0.5):
 
     x = Add()([x, shortcut])
     x = Activation("relu")(x)
+    
+    # اضافه کردن SE طبق مقاله
     x = squeeze_excitation_module(x)
 
     x = Dropout(dropout_rate)(x)
     return x
 
 def decoder_block(input_feature, skip_connection, num_filters, dropout_rate=0.5):
+    # طبق کد قدیم: آپ‌سمپلینگ دو برابر
     x = UpSampling2D((2, 2), interpolation='bilinear')(input_feature)
     
+    # اتصال کوتاه (Skip Connection)
     if skip_connection is not None:
+        # ریسایز کردن کانکشن برای تطبیق ابعاد دقیق
         skip_connection = Resizing(x.shape[1], x.shape[2], interpolation='bilinear')(skip_connection)
         x = Concatenate()([x, skip_connection])
 
@@ -89,12 +94,16 @@ def decoder_block(input_feature, skip_connection, num_filters, dropout_rate=0.5)
     x = cbam_module(x)
     return x
 
-def BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5):
+def BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5, freeze_encoder=True):
     inputs = Input(shape=input_shape, name="input_image")
     
-    # EfficientNetB3 with ImageNet weights
-    # Note: Keras 3 EfficientNet includes internal Rescaling logic (expecting 0-255 inputs)
+    # Encoder: EfficientNetB3
+    # include_top=False یعنی بدون لایه‌های کلاسیفیکیشن
     encoder = EfficientNetB3(input_tensor=inputs, weights="imagenet", include_top=False)
+    
+    # طبق مقاله: وزن‌ها ثابت می‌مانند
+    if freeze_encoder:
+        encoder.trainable = False
 
     skip_connection_names = [
         'input_image',
@@ -108,6 +117,7 @@ def BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5):
 
     decoder_filters = [192, 128, 64, 32, 16]
 
+    # ساختار U-Net معکوس
     for i, filters in enumerate(decoder_filters):
         if i < len(skip_connections) - 1:
             skip_connection = skip_connections[-(i + 2)]
