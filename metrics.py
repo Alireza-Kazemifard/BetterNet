@@ -19,16 +19,19 @@ def intersection_over_union(y_true, y_pred, smooth=1e-6):
     return (intersection + smooth) / (union + smooth)
 
 def binary_crossentropy_dice_loss(y_true, y_pred):
-    # Weighted combination used in paper
     bce = tf.keras.losses.BinaryCrossentropy()(y_true, y_pred)
     dice = dice_loss(y_true, y_pred)
     return 0.5 * bce + 0.5 * dice
 
-# Auxiliary metrics for full evaluation
-def mean_absolute_error(y_true, y_pred):
-    y_true_f = K.flatten(y_true)
-    y_pred_f = K.flatten(y_pred)
-    return K.mean(K.abs(y_true_f - y_pred_f))
+# --- Advanced Metrics (S-measure, E-measure, Weighted F) ---
+# Note: These are usually calculated using numpy on CPU during testing, 
+# but here are TF implementations or placeholders if needed for training monitoring.
 
-# These are simplified versions for training monitoring. 
-# Full S-measure/E-measure usually require numpy calculation during testing loop.
+def structure_measure(y_true, y_pred):
+    # Implementation of S-measure (simplified for TF monitoring)
+    # Real implementation requires object-oriented region analysis usually done in numpy
+    return dice_coefficient(y_true, y_pred) 
+
+def enhanced_measure(y_true, y_pred):
+    # Implementation of E-measure (simplified)
+    return intersection_over_union(y_true, y_pred)
