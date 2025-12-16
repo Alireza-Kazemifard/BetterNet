@@ -13,7 +13,6 @@ def create_directory(directory_path):
         print(f"Error: creating directory with name {directory_path}")
 
 def load_trained_model(model_path):
-    # اضافه کردن تمام متریک‌ها به CustomObjectScope برای جلوگیری از ارور هنگام لود مدل
     with CustomObjectScope({
             'intersection_over_union': intersection_over_union,
             'dice_coefficient': dice_coefficient,
@@ -25,5 +24,4 @@ def load_trained_model(model_path):
             'mean_absolute_error': mean_absolute_error
         }):
         loaded_model = tf.keras.models.load_model(model_path)
-        print("✅ Model loaded successfully.")
         return loaded_model
