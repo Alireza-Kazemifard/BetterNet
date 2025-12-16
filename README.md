@@ -1,4 +1,5 @@
 # BetterNet: An Efficient CNN Architecture with Residual Learning and Attention for Precision Polyp Segmentation 🚀
+# Keras3 compatibile
 
 [![Python Version](https://img.shields.io/badge/python-3.7%20%7C%203.8%20%7C%203.9-blue)](https://www.python.org/downloads/)
 [![TensorFlow Version](https://img.shields.io/badge/tensorflow-2.x-orange)](https://www.tensorflow.org/)
