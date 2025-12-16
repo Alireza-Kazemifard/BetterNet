@@ -1,7 +1,7 @@
 import tensorflow as tf
 from tensorflow.keras.layers import (Conv2D, Activation, BatchNormalization, UpSampling2D,
                                      Input, Concatenate, Add, Dropout, GlobalAveragePooling2D,
-                                     Reshape, Dense, multiply, Resizing, GlobalMaxPooling2D, Lambda) # Lambda added
+                                     Reshape, Dense, multiply, Resizing, GlobalMaxPooling2D, Lambda)
 from tensorflow.keras.models import Model
 from tensorflow.keras.applications import EfficientNetB3
 from tensorflow.keras.regularizers import l1_l2
@@ -27,11 +27,9 @@ def channel_attention_module(input_feature, ratio=8):
 def spatial_attention_module(input_feature):
     kernel_size = 7
     
-    # --- FIX START ---
-    # Wrap raw TF operations in Lambda layers for Keras compatibility
+    # Keras 3 Fix: Wrap TF ops in Lambda
     avg_pool = Lambda(lambda x: tf.reduce_mean(x, axis=-1, keepdims=True))(input_feature)
     max_pool = Lambda(lambda x: tf.reduce_max(x, axis=-1, keepdims=True))(input_feature)
-    # --- FIX END ---
     
     concat = Concatenate(axis=-1)([avg_pool, max_pool])
     attention_feature = Conv2D(filters=1, kernel_size=kernel_size, strides=1, padding='same', activation='sigmoid', kernel_initializer='he_normal', use_bias=False)(concat)   
@@ -58,6 +56,7 @@ def squeeze_excitation_module(input_feature, ratio=16):
 def residual_block(input_feature, num_filters, dropout_rate=0.5):
     x = input_feature
 
+    # Paper Exact Architecture: Using l1_l2 regularization
     x = Conv2D(num_filters//4, (1, 1), padding="same", kernel_regularizer=l1_l2(l1=1e-5, l2=1e-4))(x)
     x = BatchNormalization()(x)
     x = Activation("relu")(x)
@@ -87,12 +86,14 @@ def decoder_block(input_feature, skip_connection, num_filters, dropout_rate=0.5)
         x = Concatenate()([x, skip_connection])
 
     x = residual_block(x, num_filters, dropout_rate=dropout_rate)
-
     x = cbam_module(x)
     return x
 
 def BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5):
     inputs = Input(shape=input_shape, name="input_image")
+    
+    # EfficientNetB3 with ImageNet weights
+    # Note: Keras 3 EfficientNet includes internal Rescaling logic (expecting 0-255 inputs)
     encoder = EfficientNetB3(input_tensor=inputs, weights="imagenet", include_top=False)
 
     skip_connection_names = [
