@@ -1,4 +1,3 @@
-# --- START OF FILE data.py (FIXED PREPROCESSING) ---
 import os
 import numpy as np
 import cv2
@@ -35,27 +34,32 @@ def load_data(dataset_paths, split=0.1):
              images.extend(curr_images)
              masks.extend(curr_masks)
 
-    # Random Split (Matches the shuffled nature of the paper's split)
+    # Combined Shuffle Split (Matches Paper)
     train_x, valid_x, train_y, valid_y = train_test_split(images, masks, test_size=split, random_state=42)
     return (train_x, train_y), (valid_x, valid_y)
 
 def read_image(path):
     path = path.decode()
     x = cv2.imread(path, cv2.IMREAD_COLOR)
-    # FIX 1: Convert BGR to RGB (EfficientNet expects RGB)
+    
+    # --- FIX 1: Convert BGR to RGB ---
+    # مدل‌های ImageNet روی RGB آموزش دیده‌اند، اما cv2 به صورت BGR می‌خواند.
     x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
+    
     x = cv2.resize(x, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
-    # FIX 2: DO NOT divide by 255.0 here. EfficientNetB3 handles it internally.
-    # Just convert to float32
+    
+
     return x.astype(np.float32)
 
 def read_mask(path):
     path = path.decode()
     x = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     x = cv2.resize(x, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
-    x = x / 255.0 # Masks MUST be 0-1
+    
+    x = x / 255.0 
     x = np.expand_dims(x, axis=-1)
-    x = np.where(x > 0.5, 1.0, 0.0) # Binarize
+    
+    x = np.where(x > 0.5, 1.0, 0.0) 
     return x.astype(np.float32)
 
 def tf_parse(x, y):
@@ -72,7 +76,7 @@ def tf_dataset(X, Y, batch_size=8, augment=False, shuffle=False):
     dataset = tf.data.Dataset.from_tensor_slices((X, Y))
     dataset = dataset.map(tf_parse, num_parallel_calls=tf.data.AUTOTUNE)
     
-    # Cache to speed up training significantly
+    # Cache makes it faster (Prevent stuck training)
     dataset = dataset.cache()
 
     if shuffle:
