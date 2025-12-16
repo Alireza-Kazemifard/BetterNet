@@ -10,10 +10,11 @@ IMAGE_WIDTH = 256
 def load_data(dataset_path, split=0.1):
     images = sorted([os.path.join(dataset_path, "images", x) for x in os.listdir(os.path.join(dataset_path, "images"))])
     masks = sorted([os.path.join(dataset_path, "masks", x) for x in os.listdir(os.path.join(dataset_path, "masks"))])
-
+    
+    # Split
     train_x, test_x, train_y, test_y = train_test_split(images, masks, test_size=split, random_state=42)
     train_x, valid_x, train_y, valid_y = train_test_split(train_x, train_y, test_size=split, random_state=42)
-
+    
     return (train_x, train_y), (valid_x, valid_y), (test_x, test_y)
 
 def read_image(path):
@@ -37,15 +38,20 @@ def tf_parse(x, y):
         x = read_image(x)
         y = read_mask(y)
         return x, y
-
     x, y = tf.numpy_function(_parse, [x, y], [tf.float32, tf.float32])
     x.set_shape([IMAGE_HEIGHT, IMAGE_WIDTH, 3])
     y.set_shape([IMAGE_HEIGHT, IMAGE_WIDTH, 1])
     return x, y
 
-def tf_dataset(X, Y, batch_size=8):
+def tf_dataset(X, Y, batch_size=8, augment=False):
     dataset = tf.data.Dataset.from_tensor_slices((X, Y))
     dataset = dataset.map(tf_parse)
+    
+    if augment:
+        # Simple Augmentation using TF
+        dataset = dataset.map(lambda x, y: (tf.image.random_flip_left_right(x), tf.image.random_flip_left_right(y)))
+        dataset = dataset.map(lambda x, y: (tf.image.random_flip_up_down(x), tf.image.random_flip_up_down(y)))
+        
     dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(1)
     return dataset
