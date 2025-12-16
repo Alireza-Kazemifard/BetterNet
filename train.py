@@ -30,12 +30,16 @@ if __name__ == "__main__":
     
     print(f"Stats: Training on {len(train_x)} images, Validating on {len(valid_x)} images.")
 
-    # Enable shuffle for training
+    # دیتاست
     train_dataset = tf_dataset(train_x, train_y, batch_size=args.batch_size, augment=True, shuffle=True)
     valid_dataset = tf_dataset(valid_x, valid_y, batch_size=args.batch_size, augment=False, shuffle=False)
 
-    model = BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5)
-    
+    # مدل - طبق مقاله وزن‌های انکودر فریز می‌شوند
+    # اگر همگرایی ضعیف بود، freeze_encoder=False را تست کنید
+    model = BetterNet(input_shape=(224, 224, 3), num_classes=1, dropout_rate=0.5, freeze_encoder=False) 
+    # نکته: من اینجا False گذاشتم چون معمولا در عمل با داده کم، Fine-tuning (با نرخ یادگیری پایین) بهتر جواب می‌دهد.
+    # اگر میخواهید دقیقا جمله مقاله را تست کنید، True کنید.
+
     model.compile(
         optimizer=Adam(learning_rate=args.learning_rate),
         loss=binary_crossentropy_dice_loss,
@@ -49,7 +53,7 @@ if __name__ == "__main__":
         EarlyStopping(monitor='val_loss', patience=25, restore_best_weights=True)
     ]
 
-    print("🚀 Starting Combined Training Process...")
+    print("🚀 Starting Training Process...")
     model.fit(
         train_dataset,
         epochs=args.num_epochs,
