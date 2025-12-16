@@ -26,7 +26,7 @@ def _pair_by_stem(images, masks):
 def ensure_split_files(dataset_path: str, split: float = 0.1, seed: int = 42):
     """
     Ensures train.txt and val.txt exist inside dataset_path.
-    The txt files store ONLY stems (no extensions), like the old repo style.
+    The txt files store ONLY stems (no extensions).
     """
     train_txt = os.path.join(dataset_path, "train.txt")
     val_txt = os.path.join(dataset_path, "val.txt")
@@ -68,7 +68,7 @@ def ensure_split_files(dataset_path: str, split: float = 0.1, seed: int = 42):
 def load_file_names(dataset_path: str, file_name: str):
     """
     Reads stems from train.txt/val.txt and resolves them to actual image/mask paths.
-    This mimics the old repo behavior but supports mixed extensions.
+    Supports mixed extensions.
     """
     img_dir = os.path.join(dataset_path, "images")
     msk_dir = os.path.join(dataset_path, "masks")
@@ -80,19 +80,17 @@ def load_file_names(dataset_path: str, file_name: str):
     images = []
     masks = []
     for s in stems:
-        # resolve image
         img_candidates = []
         for ext in VALID_EXTS:
             img_candidates += glob(os.path.join(img_dir, s + ext))
             img_candidates += glob(os.path.join(img_dir, s + ext.upper()))
-        # resolve mask
+
         msk_candidates = []
         for ext in VALID_EXTS:
             msk_candidates += glob(os.path.join(msk_dir, s + ext))
             msk_candidates += glob(os.path.join(msk_dir, s + ext.upper()))
 
         if not img_candidates or not msk_candidates:
-            # skip silently to avoid crash, but this should not happen if split was created by us
             continue
 
         images.append(sorted(img_candidates)[0])
@@ -103,7 +101,7 @@ def load_file_names(dataset_path: str, file_name: str):
 
 def load_data(dataset_paths, split=0.1, seed: int = 42):
     """
-    Paper-style: per-dataset 10% unseen split, then combine & shuffle train parts.
+    Per-dataset 10% unseen split, then combine & shuffle train parts.
     """
     if isinstance(dataset_paths, str):
         dataset_paths = [dataset_paths]
@@ -121,7 +119,6 @@ def load_data(dataset_paths, split=0.1, seed: int = 42):
         val_x.extend(vx)
         val_y.extend(vy)
 
-    # combined shuffle (stable)
     rng = np.random.RandomState(seed)
     idx = np.arange(len(train_x))
     rng.shuffle(idx)
@@ -160,29 +157,30 @@ def load_test_data(dataset_path: str, split_mode: str = "test", split: float = 0
 def read_image(path):
     if isinstance(path, (bytes, bytearray)):
         path = path.decode()
+
     x = cv2.imread(path, cv2.IMREAD_COLOR)
     if x is None:
         raise FileNotFoundError(path)
 
-    # cv2 -> RGB
     x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
-
-    # Lanczos4 resize
     x = cv2.resize(x, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
 
-    # IMPORTANT: normalize to [0,1] (matches paper & old test)
-    x = x.astype(np.float32) / 255.0
+    # IMPORTANT: keep in [0..255] float32 (EfficientNet has its own preprocessing inside)
+    x = x.astype(np.float32)
     return x
 
 
 def read_mask(path):
     if isinstance(path, (bytes, bytearray)):
         path = path.decode()
+
     x = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if x is None:
         raise FileNotFoundError(path)
 
     x = cv2.resize(x, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
+
+    # masks -> [0,1] and binarize
     x = x.astype(np.float32) / 255.0
     x = np.expand_dims(x, axis=-1)
     x = (x > 0.5).astype(np.float32)
@@ -201,6 +199,20 @@ def tf_parse(x, y):
     return x, y
 
 
+def _augment_pair(x, y):
+    # same random decisions for x and y (IMPORTANT)
+    seed = tf.random.uniform([2], maxval=2**31 - 1, dtype=tf.int32)
+
+    x = tf.image.stateless_random_flip_left_right(x, seed)
+    y = tf.image.stateless_random_flip_left_right(y, seed)
+
+    seed2 = seed + tf.constant([1, 0], dtype=tf.int32)
+    x = tf.image.stateless_random_flip_up_down(x, seed2)
+    y = tf.image.stateless_random_flip_up_down(y, seed2)
+
+    return x, y
+
+
 def tf_dataset(X, Y, batch_size=8, augment=False, shuffle=False):
     ds = tf.data.Dataset.from_tensor_slices((X, Y))
     ds = ds.map(tf_parse, num_parallel_calls=tf.data.AUTOTUNE)
@@ -209,11 +221,7 @@ def tf_dataset(X, Y, batch_size=8, augment=False, shuffle=False):
         ds = ds.shuffle(buffer_size=len(X), reshuffle_each_iteration=True)
 
     if augment:
-        # simple flips (paper doesn't explicitly mention aug; keep minimal)
-        ds = ds.map(lambda x, y: (tf.image.random_flip_left_right(x), tf.image.random_flip_left_right(y)),
-                    num_parallel_calls=tf.data.AUTOTUNE)
-        ds = ds.map(lambda x, y: (tf.image.random_flip_up_down(x), tf.image.random_flip_up_down(y)),
-                    num_parallel_calls=tf.data.AUTOTUNE)
+        ds = ds.map(_augment_pair, num_parallel_calls=tf.data.AUTOTUNE)
 
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
