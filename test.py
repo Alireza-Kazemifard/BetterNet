@@ -6,148 +6,150 @@ import pandas as pd
 import cv2
 import tensorflow as tf
 from tqdm import tqdm
-from sklearn.model_selection import train_test_split
-from glob import glob
-from utils import load_trained_model, create_directory
-from metrics import *
 
-# Check for CRF
+from utils import load_trained_model, create_directory
+from metrics import (
+    intersection_over_union, dice_coefficient, weighted_f_score,
+    s_score, e_score, max_e_score, mean_absolute_error
+)
+from data import load_test_data, IMAGE_HEIGHT, IMAGE_WIDTH
+
+
+# CRF
 try:
     import pydensecrf.densecrf as dcrf
     CRF_AVAILABLE = True
 except ImportError:
-    print("Warning: pydensecrf not installed. Skipping CRF.")
     CRF_AVAILABLE = False
 
-def apply_crf(image, probability_mask):
-    if not CRF_AVAILABLE: return probability_mask
-    image = (image * 255).astype(np.uint8)
-    prob = probability_mask.squeeze()
-    
-    # Setup CRF
-    d = dcrf.DenseCRF2D(image.shape[1], image.shape[0], 2)
-    
-    # Unary energy
-    U = np.stack([1 - prob, prob], axis=0)
-    U = -np.log(U + 1e-10)
-    U = U.reshape((2, -1)).astype(np.float32)
+
+def apply_morphology(mask01: np.ndarray):
+    # mask01: 0/1 uint8 or float
+    m = (mask01 > 0.5).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    m = cv2.dilate(m, kernel, iterations=1)
+    m = cv2.erode(m, kernel, iterations=1)
+    return m.astype(np.float32)
+
+
+def apply_crf(rgb_uint8: np.ndarray, prob01: np.ndarray):
+    """
+    rgb_uint8: HxWx3 uint8 (RGB)
+    prob01: HxW float in [0,1] (foreground prob)
+    returns: HxW float (0/1)
+    """
+    if not CRF_AVAILABLE:
+        return (prob01 > 0.5).astype(np.float32)
+
+    H, W = prob01.shape
+    d = dcrf.DenseCRF2D(W, H, 2)
+
+    # Unary
+    p = np.clip(prob01, 1e-7, 1 - 1e-7)
+    U = np.stack([1 - p, p], axis=0)
+    U = -np.log(U).reshape((2, -1)).astype(np.float32)
     d.setUnaryEnergy(U)
-    
-    # Pairwise energy
+
+    # Pairwise
     d.addPairwiseGaussian(sxy=3, compat=3)
-    d.addPairwiseBilateral(sxy=80, srgb=13, rgbim=image, compat=10)
-    
-    # Inference
+    d.addPairwiseBilateral(sxy=80, srgb=13, rgbim=rgb_uint8, compat=10)
+
     Q = d.inference(10)
-    map = np.argmax(Q, axis=0).reshape((image.shape[0], image.shape[1]))
-    return map.astype(np.float32)
+    pred = np.argmax(Q, axis=0).reshape((H, W)).astype(np.float32)
+    return pred
+
+
+def compute_metrics_np(y_true01: np.ndarray, y_pred01: np.ndarray):
+    # flatten for tf-metrics (keeps consistent with saved funcs)
+    yt = y_true01.reshape(-1).astype(np.float32)
+    yp = y_pred01.reshape(-1).astype(np.float32)
+
+    iou = float(intersection_over_union(yt, yp).numpy())
+    dice = float(dice_coefficient(yt, yp).numpy())
+    f = float(weighted_f_score(yt, yp).numpy())
+    s = float(s_score(yt, yp).numpy())
+    e = float(e_score(yt, yp).numpy())
+    me = float(max_e_score(yt, yp).numpy())
+    mae = float(mean_absolute_error(yt, yp).numpy())
+    return iou, dice, f, s, e, me, mae
+
 
 if __name__ == "__main__":
+    np.random.seed(42)
+    tf.random.set_seed(42)
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_path", type=str, required=True, help="Path to the dataset folder")
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the .keras model file")
-    parser.add_argument("--save_dir", type=str, required=True, help="Path to save results")
-    parser.add_argument("--split_mode", type=str, default="full", choices=["test", "full"], 
-                        help="test: Use 10% split (unseen during train), full: Use entire dataset")
+    parser.add_argument("--dataset_path", type=str, required=True)
+    parser.add_argument("--model_path", type=str, required=True)
+    parser.add_argument("--save_dir", type=str, required=True)
+
+    parser.add_argument("--split_mode", type=str, default="test", choices=["test", "full"])
+    parser.add_argument("--use_crf", action="store_true")
+    parser.add_argument("--use_morphology", action="store_true")
+    parser.add_argument("--threshold", type=float, default=0.5)
     args = parser.parse_args()
 
     create_directory(args.save_dir)
-    print(f"⏳ Loading Model from {args.model_path}...")
+
+    print(f"⏳ Loading Model: {args.model_path}")
     model = load_trained_model(args.model_path)
 
-    # 1. Load All Files First
-    all_images = sorted(glob(os.path.join(args.dataset_path, "images", "*")))
-    all_masks = sorted(glob(os.path.join(args.dataset_path, "masks", "*")))
-    
-    # Validation checks
-    all_images = [x for x in all_images if x.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif'))]
-    all_masks = [x for x in all_masks if x.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif'))]
-    
-    if len(all_images) == 0:
-        print("❌ No images found in the specified path.")
-        exit()
+    test_x, test_y = load_test_data(args.dataset_path, split_mode=args.split_mode, split=0.1, seed=42)
+    print(f"📦 Testing on {len(test_x)} images. split_mode={args.split_mode}")
+    if args.use_crf and not CRF_AVAILABLE:
+        print("⚠️ CRF requested but pydensecrf is not installed. Skipping CRF.")
 
-    # 2. Handle Split Logic
-    if args.split_mode == "test":
-        print("✂️ Mode: TEST SPLIT (Using 10% unseen data)")
-        # Must use same random_state as training to ensure we pick the correct 'unseen' part
-        # We discard the training part (_) and keep the test part
-        _, test_x, _, test_y = train_test_split(all_images, all_masks, test_size=0.1, random_state=42)
-    else:
-        print("📂 Mode: FULL DATASET (Generalization Test)")
-        test_x, test_y = all_images, all_masks
+    rows = []
+    total_time = 0.0
 
-    print(f"🎯 Testing on {len(test_x)} images.")
-    
-    metrics_score = [0.0] * 5  # IoU, Dice, F, S, E
-    time_taken = []
+    for img_path, msk_path in tqdm(list(zip(test_x, test_y))):
+        name = os.path.splitext(os.path.basename(img_path))[0]
 
-    for i, (x, y) in tqdm(enumerate(zip(test_x, test_y)), total=len(test_x)):
-        name = os.path.split(x)[1].split(".")[0]
-        
-        # Read & Preprocess
-        image = cv2.imread(x, cv2.IMREAD_COLOR)
-        if image is None: continue
-        
-        # Resize using Lanczos4 (Best quality)
-        image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_LANCZOS4)
-        x_img = image / 255.0
-        x_img_input = np.expand_dims(x_img, axis=0).astype(np.float32)
+        # read + preprocess (MATCH train)
+        bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        m = cv2.imread(msk_path, cv2.IMREAD_GRAYSCALE)
+        if bgr is None or m is None:
+            continue
 
-        mask = cv2.imread(y, cv2.IMREAD_GRAYSCALE)
-        if mask is None: continue
-        mask = cv2.resize(mask, (224, 224), interpolation=cv2.INTER_LANCZOS4)
-        mask = mask / 255.0
-        mask_binary = (mask > 0.5).astype(np.float32)
-        
-        # Inference
-        start_t = time.perf_counter()
-        y_pred = model.predict(x_img_input, verbose=0)[0]
-        end_t = time.perf_counter()
-        time_taken.append(end_t - start_t)
-        
-        # Post-process (CRF)
-        if CRF_AVAILABLE:
-            y_pred_crf = apply_crf(x_img, y_pred)
-            y_pred_binary = np.expand_dims(y_pred_crf, axis=-1)
-        else:
-            y_pred_binary = (y_pred > 0.5).astype(np.float32)
+        bgr = cv2.resize(bgr, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        rgb01 = rgb.astype(np.float32) / 255.0
 
-        # Metrics Calculation
-        metrics_score[0] += intersection_over_union(mask_binary, y_pred_binary).numpy()
-        metrics_score[1] += dice_coefficient(mask_binary, y_pred_binary).numpy()
-        metrics_score[2] += weighted_f_score(mask_binary, y_pred_binary).numpy()
-        metrics_score[3] += s_score(mask_binary, y_pred_binary).numpy()
-        metrics_score[4] += e_score(mask_binary, y_pred_binary).numpy()
-        
-        # Save Sample Visuals (First 20 images)
-        if i < 20: 
-            final_img = np.concatenate([
-                image, 
-                np.ones((224, 10, 3))*255,
-                cv2.cvtColor((mask_binary*255).astype(np.uint8), cv2.COLOR_GRAY2BGR),
-                np.ones((224, 10, 3))*255,
-                cv2.cvtColor((y_pred_binary*255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-            ], axis=1)
-            cv2.imwrite(f"{args.save_dir}/{name}.png", final_img)
+        m = cv2.resize(m, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
+        m01 = (m.astype(np.float32) / 255.0) > 0.5
+        m01 = m01.astype(np.float32)
 
-    # Calculate Averages & Save
-    if len(test_x) > 0:
-        results = {
-            "mIoU": metrics_score[0]/len(test_x),
-            "mDice": metrics_score[1]/len(test_x),
-            "F_score": metrics_score[2]/len(test_x),
-            "S_score": metrics_score[3]/len(test_x),
-            "E_score": metrics_score[4]/len(test_x),
-            "FPS": 1.0 / np.mean(time_taken) if time_taken else 0
-        }
-        
-        print("-" * 30)
-        print(f"📊 Results for {os.path.basename(args.dataset_path)}:")
-        for k, v in results.items():
-            print(f"{k}: {v:.4f}")
-        print("-" * 30)
+        x = np.expand_dims(rgb01, axis=0)
 
-        pd.DataFrame([results]).to_csv(f"{args.save_dir}/results.csv", index=False)
-    else:
-        print("⚠️ No images found to test.")
+        t0 = time.time()
+        pred = model.predict(x, verbose=0)[0, :, :, 0]  # prob
+        total_time += (time.time() - t0)
+
+        pred01 = pred
+
+        if args.use_crf and CRF_AVAILABLE:
+            pred01 = apply_crf(rgb.astype(np.uint8), pred01)
+
+        # threshold
+        pred01 = (pred01 > args.threshold).astype(np.float32)
+
+        if args.use_morphology:
+            pred01 = apply_morphology(pred01)
+
+        # metrics
+        iou, dice, f, s, e, me, mae = compute_metrics_np(m01, pred01)
+        rows.append([name, iou, dice, f, s, e, me, mae])
+
+        # save visualization
+        vis_dir = os.path.join(args.save_dir, "vis")
+        os.makedirs(vis_dir, exist_ok=True)
+        overlay = bgr.copy()
+        overlay[pred01 > 0.5] = (0.3 * overlay[pred01 > 0.5] + 0.7 * np.array([0, 0, 255])).astype(np.uint8)
+        cv2.imwrite(os.path.join(vis_dir, f"{name}_overlay.png"), overlay)
+
+    df = pd.DataFrame(rows, columns=["name", "IoU", "Dice", "Fwb", "S", "E", "maxE", "MAE"])
+    df.to_csv(os.path.join(args.save_dir, "metrics.csv"), index=False)
+
+    print(df.mean(numeric_only=True))
+    print(f"⏱ Avg inference time: {total_time / max(1, len(rows)):.4f} sec/image")
+    print("✅ Done.")
