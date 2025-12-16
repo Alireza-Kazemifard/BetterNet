@@ -4,8 +4,7 @@ from tensorflow.keras.applications import EfficientNetB3
 
 def cbam_module(input_feature, ratio=8):
     """
-    Convolutional Block Attention Module (CBAM)
-    Matches the original paper implementation.
+    Convolutional Block Attention Module (CBAM) - Original Paper Implementation
     """
     channel = input_feature.shape[-1]
     
@@ -34,9 +33,6 @@ def cbam_module(input_feature, ratio=8):
     return layers.Multiply()([x, spatial_attention])
 
 def residual_block(input_tensor, filters, strides=1):
-    """
-    Residual Block used in the decoder path
-    """
     x = layers.Conv2D(filters, 3, strides=strides, padding='same', kernel_initializer='he_normal')(input_tensor)
     x = layers.BatchNormalization()(x)
     x = layers.Activation('relu')(x)
@@ -58,7 +54,6 @@ def decoder_block(input_tensor, skip_tensor, filters, dropout_rate=0.0):
     x = layers.UpSampling2D((2, 2))(input_tensor)
     
     if skip_tensor is not None:
-        # Resize if shapes don't match (handling potential rounding issues in EfficientNet)
         if x.shape[1] != skip_tensor.shape[1] or x.shape[2] != skip_tensor.shape[2]:
             x = layers.Resizing(skip_tensor.shape[1], skip_tensor.shape[2])(x)
         x = layers.Concatenate()([x, skip_tensor])
@@ -75,19 +70,14 @@ def decoder_block(input_tensor, skip_tensor, filters, dropout_rate=0.0):
 def BetterNet(input_shape=(256, 256, 3), num_classes=1, dropout_rate=0.5):
     inputs = Input(shape=input_shape)
     
-    # Use EfficientNetB3 as Backbone (Original Paper Setting)
+    # Original Paper uses EfficientNetB3
     encoder = EfficientNetB3(include_top=False, weights='imagenet', input_tensor=inputs)
     
-    # Freeze encoder weights initially (Optional, often done in transfer learning)
-    # encoder.trainable = False 
-    
-    # Extract features from specific layers of EfficientNetB3
-    # Note: Layer names might change between TF versions, these are standard for B3
-    # You can verify layer names with encoder.summary()
-    skip1 = encoder.get_layer('block6a_expand_activation').output # ~1/32
-    skip2 = encoder.get_layer('block4a_expand_activation').output # ~1/16
-    skip3 = encoder.get_layer('block3a_expand_activation').output # ~1/8
-    skip4 = encoder.get_layer('block2a_expand_activation').output # ~1/4
+    # Encoder Output Features
+    skip1 = encoder.get_layer('block6a_expand_activation').output 
+    skip2 = encoder.get_layer('block4a_expand_activation').output 
+    skip3 = encoder.get_layer('block3a_expand_activation').output 
+    skip4 = encoder.get_layer('block2a_expand_activation').output 
     
     # Decoder Path
     d1 = decoder_block(encoder.output, skip1, 256, dropout_rate)
@@ -98,4 +88,4 @@ def BetterNet(input_shape=(256, 256, 3), num_classes=1, dropout_rate=0.5):
     
     outputs = layers.Conv2D(num_classes, 1, activation='sigmoid')(d5)
     
-    return models.Model(inputs=inputs, outputs=outputs, name="BetterNet_B3")
+    return models.Model(inputs=inputs, outputs=outputs, name="BetterNet")
