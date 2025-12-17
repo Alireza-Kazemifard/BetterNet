@@ -28,6 +28,24 @@ def build_lr_schedule(initial_lr, end_lr, steps_per_epoch, num_epochs):
     )
 
 
+def set_encoder_trainable(model: tf.keras.Model, trainable: bool, freeze_bn: bool):
+    """
+    EfficientNetB3 layers in your graph have names like:
+    rescaling_*, normalization_*, stem_*, block*, top_*
+    We toggle ONLY those as encoder.
+    """
+    encoder_prefixes = ("rescaling", "normalization", "stem_", "block", "top_")
+    for layer in model.layers:
+        is_encoder = layer.name.startswith(encoder_prefixes)
+        if not is_encoder:
+            continue
+
+        if freeze_bn and isinstance(layer, tf.keras.layers.BatchNormalization):
+            layer.trainable = False
+        else:
+            layer.trainable = trainable
+
+
 if __name__ == "__main__":
     np.random.seed(42)
     tf.random.set_seed(42)
@@ -36,16 +54,20 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_paths", nargs="+", required=True)
     parser.add_argument("--save_dir", type=str, required=True)
 
-    parser.add_argument("--num_epochs", type=int, default=150)      # paper: 150
-    parser.add_argument("--batch_size", type=int, default=8)        # paper: 8
+    parser.add_argument("--num_epochs", type=int, default=150)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--end_learning_rate", type=float, default=1e-7)  # paper: 1e-7
+    parser.add_argument("--end_learning_rate", type=float, default=1e-7)
 
     parser.add_argument("--use_polynomial_lr", action="store_true")
-    parser.add_argument("--freeze_encoder", action="store_true")     # paper: fixed encoder
-    parser.add_argument("--use_augmentation", action="store_true")   # paper doesn't emphasize; default off
+    parser.add_argument("--freeze_encoder", action="store_true")
+    parser.add_argument("--use_augmentation", action="store_true")
 
-    parser.add_argument("--early_stopping_patience", type=int, default=0)  # 0 => disabled
+    # NEW:
+    parser.add_argument("--resume_model_path", type=str, default="")
+    parser.add_argument("--freeze_bn", action="store_true")  # recommended during fine-tuning
+
+    parser.add_argument("--early_stopping_patience", type=int, default=0)
     args = parser.parse_args()
 
     create_directory(args.save_dir)
@@ -61,11 +83,25 @@ if __name__ == "__main__":
     valid_dataset = tf_dataset(valid_x, valid_y, batch_size=args.batch_size,
                                augment=False, shuffle=False)
 
-    model = BetterNet(input_shape=(224, 224, 3), num_classes=1,
-                      dropout_rate=0.5, freeze_encoder=args.freeze_encoder)
-
     steps_per_epoch = max(1, int(np.ceil(len(train_x) / args.batch_size)))
 
+    # --------- Build / Resume model ----------
+    if args.resume_model_path:
+        print(f"📌 Resuming from model: {args.resume_model_path}")
+        model = tf.keras.models.load_model(args.resume_model_path, compile=False)
+    else:
+        model = BetterNet(input_shape=(224, 224, 3), num_classes=1,
+                          dropout_rate=0.5, freeze_encoder=args.freeze_encoder)
+
+    # Apply (freeze/unfreeze) policy AFTER loading/building
+    if args.freeze_encoder:
+        set_encoder_trainable(model, trainable=False, freeze_bn=False)
+        print("🧊 Encoder is frozen.")
+    else:
+        set_encoder_trainable(model, trainable=True, freeze_bn=args.freeze_bn)
+        print(f"🔥 Encoder is unfrozen. freeze_bn={args.freeze_bn}")
+
+    # --------- Optimizer ----------
     if args.use_polynomial_lr:
         lr = build_lr_schedule(args.learning_rate, args.end_learning_rate, steps_per_epoch, args.num_epochs)
         optimizer = Adam(learning_rate=lr)
@@ -74,9 +110,10 @@ if __name__ == "__main__":
         optimizer = Adam(learning_rate=args.learning_rate)
         print("ℹ️ Using constant LR.")
 
+    # --------- Compile ----------
     model.compile(
         optimizer=optimizer,
-        loss=binary_crossentropy_dice_loss,   # alpha=0.5 inside (matches paper text)
+        loss=binary_crossentropy_dice_loss,
         metrics=[dice_coefficient, intersection_over_union, weighted_f_score, s_score, e_score]
     )
 
