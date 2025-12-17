@@ -2,7 +2,7 @@ import os
 import argparse
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, EarlyStopping,ReduceLROnPlateau,TensorBoard
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, EarlyStopping, ReduceLROnPlateau, TensorBoard
 from tensorflow.keras.optimizers import Adam
 
 from metrics import (
@@ -12,34 +12,20 @@ from metrics import (
     weighted_f_score,
     s_score,
     e_score,
+    mean_absolute_error
 )
 from model import BetterNet
 from utils import create_directory
 from data import load_data, tf_dataset
 
 
-def build_lr_schedule(initial_lr, end_lr, steps_per_epoch, num_epochs):
-    decay_steps = int(steps_per_epoch * num_epochs)
-    return tf.keras.optimizers.schedules.PolynomialDecay(
-        initial_learning_rate=initial_lr,
-        decay_steps=decay_steps,
-        end_learning_rate=end_lr,
-        power=1.0
-    )
-
-
 def set_encoder_trainable(model: tf.keras.Model, trainable: bool, freeze_bn: bool):
-    """
-    EfficientNetB3 layers in your graph have names like:
-    rescaling_*, normalization_*, stem_*, block*, top_*
-    We toggle ONLY those as encoder.
-    """
+    """Toggle EfficientNet encoder layers (rescaling/normalization/stem/block/top)"""
     encoder_prefixes = ("rescaling", "normalization", "stem_", "block", "top_")
     for layer in model.layers:
         is_encoder = layer.name.startswith(encoder_prefixes)
         if not is_encoder:
             continue
-
         if freeze_bn and isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
         else:
@@ -53,21 +39,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_paths", nargs="+", required=True)
     parser.add_argument("--save_dir", type=str, required=True)
-
     parser.add_argument("--num_epochs", type=int, default=150)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--end_learning_rate", type=float, default=1e-7)
-
     parser.add_argument("--use_polynomial_lr", action="store_true")
     parser.add_argument("--freeze_encoder", action="store_true")
     parser.add_argument("--use_augmentation", action="store_true")
-
-    # NEW:
     parser.add_argument("--resume_model_path", type=str, default="")
-    parser.add_argument("--freeze_bn", action="store_true")  # recommended during fine-tuning
-
-    parser.add_argument("--early_stopping_patience", type=int, default=0)
+    parser.add_argument("--freeze_bn", action="store_true")
+    parser.add_argument("--patience", type=int, default=20)
     args = parser.parse_args()
 
     create_directory(args.save_dir)
@@ -85,15 +66,15 @@ if __name__ == "__main__":
 
     steps_per_epoch = max(1, int(np.ceil(len(train_x) / args.batch_size)))
 
-    # --------- Build / Resume model ----------
-    if args.resume_model_path:
-        print(f"📌 Resuming from model: {args.resume_model_path}")
+    # Build or resume model
+    if args.resume_model_path and os.path.exists(args.resume_model_path):
+        print(f"📌 Resuming from: {args.resume_model_path}")
         model = tf.keras.models.load_model(args.resume_model_path, compile=False)
     else:
         model = BetterNet(input_shape=(224, 224, 3), num_classes=1,
                           dropout_rate=0.5, freeze_encoder=args.freeze_encoder)
 
-    # Apply (freeze/unfreeze) policy AFTER loading/building
+    # Freeze/unfreeze encoder
     if args.freeze_encoder:
         set_encoder_trainable(model, trainable=False, freeze_bn=False)
         print("🧊 Encoder is frozen.")
@@ -101,33 +82,47 @@ if __name__ == "__main__":
         set_encoder_trainable(model, trainable=True, freeze_bn=args.freeze_bn)
         print(f"🔥 Encoder is unfrozen. freeze_bn={args.freeze_bn}")
 
-    # --------- Optimizer ----------
-    if args.use_polynomial_lr:
-        lr = build_lr_schedule(args.learning_rate, args.end_learning_rate, steps_per_epoch, args.num_epochs)
-        optimizer = Adam(learning_rate=lr)
-        print("✅ Using Polynomial LR schedule.")
-    else:
-        optimizer = Adam(learning_rate=args.learning_rate)
-        print("ℹ️ Using constant LR.")
+    # ✅ Optimizer با float LR (بدون schedule object)
+    optimizer = Adam(learning_rate=args.learning_rate)
 
-    # --------- Compile ----------
+    # Compile
     model.compile(
         optimizer=optimizer,
-        loss=binary_crossentropy_dice_loss,
-        metrics=[dice_coefficient, intersection_over_union, weighted_f_score, s_score, e_score]
+        loss=lambda y_true, y_pred: binary_crossentropy_dice_loss(y_true, y_pred, alpha=0.5),
+        metrics=[
+            dice_coefficient, intersection_over_union, weighted_f_score,
+            s_score, e_score, mean_absolute_error
+        ]
     )
 
+    # ✅ Callbacks (schedule جدا)
     callbacks = [
-        ModelCheckpoint(model_path, verbose=1, save_best_only=True, monitor="val_loss"),
+        ModelCheckpoint(model_path, monitor="val_loss", save_best_only=True, verbose=1),
         CSVLogger(csv_path),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=15, min_lr=1e-7, verbose=1),
-        TensorBoard(log_dir='./logs'),
-        EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
+        TensorBoard(log_dir=os.path.join(args.save_dir, "logs"))
     ]
 
-    if args.early_stopping_patience and args.early_stopping_patience > 0:
+    # ✅ Polynomial LR callback
+    if args.use_polynomial_lr:
+        def polynomial_schedule(epoch):
+            progress = epoch / args.num_epochs
+            decayed_lr = args.learning_rate * ((1 - progress) ** 0.9)
+            return max(decayed_lr, args.end_learning_rate)
+        
         callbacks.append(
-            EarlyStopping(monitor="val_loss", patience=args.early_stopping_patience, restore_best_weights=True)
+            tf.keras.callbacks.LearningRateScheduler(polynomial_schedule, verbose=1)
+        )
+        print("Using Polynomial LR schedule.")
+    
+    # Optional: ReduceLROnPlateau
+    if args.patience > 0:
+        callbacks.append(
+            ReduceLROnPlateau(monitor='val_loss', patience=args.patience, 
+                            factor=0.5, min_lr=args.end_learning_rate, verbose=1)
+        )
+        callbacks.append(
+            EarlyStopping(monitor='val_loss', patience=args.patience * 2, 
+                         restore_best_weights=True, verbose=1)
         )
 
     print("🚀 Starting Training...")
@@ -138,4 +133,4 @@ if __name__ == "__main__":
         callbacks=callbacks
     )
 
-    print(f"✅ Saved best model to: {model_path}")
+    print(f"✅ Training complete. Best model saved to: {model_path}")
