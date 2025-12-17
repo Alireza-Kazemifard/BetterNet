@@ -14,7 +14,6 @@ from metrics import (
 )
 from data import load_test_data, IMAGE_HEIGHT, IMAGE_WIDTH
 
-
 # CRF
 try:
     import pydensecrf.densecrf as dcrf
@@ -24,7 +23,7 @@ except ImportError:
 
 
 def apply_morphology(mask01: np.ndarray):
-    # mask01: 0/1 uint8 or float
+    # mask01: HxW float(0/1) or uint8
     m = (mask01 > 0.5).astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     m = cv2.dilate(m, kernel, iterations=1)
@@ -60,7 +59,6 @@ def apply_crf(rgb_uint8: np.ndarray, prob01: np.ndarray):
 
 
 def compute_metrics_np(y_true01: np.ndarray, y_pred01: np.ndarray):
-    # flatten for tf-metrics (keeps consistent with saved funcs)
     yt = y_true01.reshape(-1).astype(np.float32)
     yp = y_pred01.reshape(-1).astype(np.float32)
 
@@ -96,16 +94,20 @@ if __name__ == "__main__":
 
     test_x, test_y = load_test_data(args.dataset_path, split_mode=args.split_mode, split=0.1, seed=42)
     print(f"📦 Testing on {len(test_x)} images. split_mode={args.split_mode}")
+
     if args.use_crf and not CRF_AVAILABLE:
         print("⚠️ CRF requested but pydensecrf is not installed. Skipping CRF.")
 
     rows = []
     total_time = 0.0
 
+    vis_dir = os.path.join(args.save_dir, "vis")
+    os.makedirs(vis_dir, exist_ok=True)
+
     for img_path, msk_path in tqdm(list(zip(test_x, test_y))):
         name = os.path.splitext(os.path.basename(img_path))[0]
 
-        # read + preprocess (MATCH train)
+        # read + preprocess (MUST MATCH train: EfficientNet expects 0..255 float input in Keras 3)
         bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
         m = cv2.imread(msk_path, cv2.IMREAD_GRAYSCALE)
         if bgr is None or m is None:
@@ -113,16 +115,18 @@ if __name__ == "__main__":
 
         bgr = cv2.resize(bgr, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        rgb01 = rgb.astype(np.float32) / 255.0
+
+        # IMPORTANT FIX: DO NOT /255 HERE (train uses 0..255 float)
+        x_in = rgb.astype(np.float32)
 
         m = cv2.resize(m, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
         m01 = (m.astype(np.float32) / 255.0) > 0.5
         m01 = m01.astype(np.float32)
 
-        x = np.expand_dims(rgb01, axis=0)
+        x = np.expand_dims(x_in, axis=0)
 
         t0 = time.time()
-        pred = model.predict(x, verbose=0)[0, :, :, 0]  # prob
+        pred = model.predict(x, verbose=0)[0, :, :, 0]  # prob in [0,1]
         total_time += (time.time() - t0)
 
         pred01 = pred
@@ -140,9 +144,7 @@ if __name__ == "__main__":
         iou, dice, f, s, e, me, mae = compute_metrics_np(m01, pred01)
         rows.append([name, iou, dice, f, s, e, me, mae])
 
-        # save visualization
-        vis_dir = os.path.join(args.save_dir, "vis")
-        os.makedirs(vis_dir, exist_ok=True)
+        # save visualization (overlay prediction on original)
         overlay = bgr.copy()
         overlay[pred01 > 0.5] = (0.3 * overlay[pred01 > 0.5] + 0.7 * np.array([0, 0, 255])).astype(np.uint8)
         cv2.imwrite(os.path.join(vis_dir, f"{name}_overlay.png"), overlay)
@@ -150,6 +152,9 @@ if __name__ == "__main__":
     df = pd.DataFrame(rows, columns=["name", "IoU", "Dice", "Fwb", "S", "E", "maxE", "MAE"])
     df.to_csv(os.path.join(args.save_dir, "metrics.csv"), index=False)
 
+    print("-" * 40)
+    print(f"📊 Results for {os.path.basename(args.dataset_path)} (split_mode={args.split_mode})")
     print(df.mean(numeric_only=True))
     print(f"⏱ Avg inference time: {total_time / max(1, len(rows)):.4f} sec/image")
+    print("-" * 40)
     print("✅ Done.")
