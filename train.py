@@ -2,7 +2,7 @@ import os
 import argparse
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, EarlyStopping
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, EarlyStopping,ReduceLROnPlateau,TensorBoard
 from tensorflow.keras.optimizers import Adam
 
 from metrics import (
