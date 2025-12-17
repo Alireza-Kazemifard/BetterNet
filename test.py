@@ -6,13 +6,20 @@ import pandas as pd
 import cv2
 import tensorflow as tf
 from tqdm import tqdm
-
 from utils import load_trained_model, create_directory
-from metrics import (
-    intersection_over_union, dice_coefficient, weighted_f_score,
-    s_score, e_score, max_e_score, mean_absolute_error
-)
+
+# Fan toolbox (PySegMetric) برای ارزیابی دقیق مطابق مقاله
+try:
+    from PySegMetrics import Fm, Sm, Em, MAE, Wfm
+    FAN_AVAILABLE = True
+except ImportError:
+    FAN_AVAILABLE = False
+    print("⚠️ Fan toolbox not installed. Install with: pip install git+https://github.com/Xiaoqi-Zhao-DLUT/PySegMetric_EvalToolkit.git")
+
 from data import load_test_data, IMAGE_HEIGHT, IMAGE_WIDTH
+
+# فقط Dice و IoU از metrics.py (برای سازگاری)
+from metrics import dice_coefficient, intersection_over_union
 
 # CRF
 try:
@@ -21,7 +28,6 @@ try:
 except ImportError:
     CRF_AVAILABLE = False
 
-
 def apply_morphology(mask01: np.ndarray):
     # mask01: HxW float(0/1) or uint8
     m = (mask01 > 0.5).astype(np.uint8)
@@ -29,7 +35,6 @@ def apply_morphology(mask01: np.ndarray):
     m = cv2.dilate(m, kernel, iterations=1)
     m = cv2.erode(m, kernel, iterations=1)
     return m.astype(np.float32)
-
 
 def apply_crf(rgb_uint8: np.ndarray, prob01: np.ndarray):
     """
@@ -57,20 +62,47 @@ def apply_crf(rgb_uint8: np.ndarray, prob01: np.ndarray):
     pred = np.argmax(Q, axis=0).reshape((H, W)).astype(np.float32)
     return pred
 
+def compute_metrics_fan_toolbox(y_true_uint8: np.ndarray, y_pred_uint8: np.ndarray):
+    """
+    محاسبه متریک‌ها با Fan toolbox (PySegMetric)
+    y_true_uint8/y_pred_uint8: HxW uint8 (0-255)
+    """
+    if not FAN_AVAILABLE:
+        # Fallback به approximations
+        yt = (y_true_uint8 > 127).astype(np.float32).reshape(-1)
+        yp = (y_pred_uint8 > 127).astype(np.float32).reshape(-1)
+        iou = float(intersection_over_union(yt, yp).numpy())
+        dice = float(dice_coefficient(yt, yp).numpy())
+        # Dummy values
+        return iou, dice, 0.0, 0.0, 0.0, 0.0, 0.0
 
-def compute_metrics_np(y_true01: np.ndarray, y_pred01: np.ndarray):
-    yt = y_true01.reshape(-1).astype(np.float32)
-    yp = y_pred01.reshape(-1).astype(np.float32)
-
+    # Dice & IoU (سازگاری)
+    yt = (y_true_uint8 > 127).astype(np.float32).reshape(-1)
+    yp = (y_pred_uint8 > 127).astype(np.float32).reshape(-1)
     iou = float(intersection_over_union(yt, yp).numpy())
     dice = float(dice_coefficient(yt, yp).numpy())
-    f = float(weighted_f_score(yt, yp).numpy())
-    s = float(s_score(yt, yp).numpy())
-    e = float(e_score(yt, yp).numpy())
-    me = float(max_e_score(yt, yp).numpy())
-    mae = float(mean_absolute_error(yt, yp).numpy())
-    return iou, dice, f, s, e, me, mae
 
+    # Fan toolbox (دقیق)
+    fm = Fm()
+    wfm = Wfm()
+    sm = Sm()
+    em_inst = Em()
+    mae = MAE()
+
+    fm.step(pred=y_pred_uint8, gt=y_true_uint8)
+    wfm.step(pred=y_pred_uint8, gt=y_true_uint8)
+    sm.step(pred=y_pred_uint8, gt=y_true_uint8)
+    em_inst.step(pred=y_pred_uint8, gt=y_true_uint8)
+    mae.step(pred=y_pred_uint8, gt=y_true_uint8)
+
+    fm_score = fm.get_results()['fm']  # mean F-measure
+    wfm_score = wfm.get_results()['wfm']  # weighted F-measure
+    s_score = sm.get_results()['sm']  # S-measure
+    e_score = em_inst.get_results()['em']  # mean E-measure
+    max_e = em_inst.get_results()['maxEm']  # max E-measure
+    mae_score = mae.get_results()['mae']  # MAE
+
+    return iou, dice, wfm_score, s_score, e_score, max_e, mae_score
 
 if __name__ == "__main__":
     np.random.seed(42)
@@ -80,7 +112,6 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_path", type=str, required=True)
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
-
     parser.add_argument("--split_mode", type=str, default="test", choices=["test", "full"])
     parser.add_argument("--use_crf", action="store_true")
     parser.add_argument("--use_morphology", action="store_true")
@@ -88,7 +119,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     create_directory(args.save_dir)
-
     print(f"⏳ Loading Model: {args.model_path}")
     model = load_trained_model(args.model_path)
 
@@ -100,33 +130,30 @@ if __name__ == "__main__":
 
     rows = []
     total_time = 0.0
-
     vis_dir = os.path.join(args.save_dir, "vis")
     os.makedirs(vis_dir, exist_ok=True)
 
     for img_path, msk_path in tqdm(list(zip(test_x, test_y))):
         name = os.path.splitext(os.path.basename(img_path))[0]
 
-        # read + preprocess (MUST MATCH train: EfficientNet expects 0..255 float input in Keras 3)
+        # read + preprocess (MUST MATCH train: EfficientNet expects 0..255 float input)
         bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
         m = cv2.imread(msk_path, cv2.IMREAD_GRAYSCALE)
+
         if bgr is None or m is None:
             continue
 
         bgr = cv2.resize(bgr, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        x_in = rgb.astype(np.float32)  # 0..255 float (no /255)
 
-        # IMPORTANT FIX: DO NOT /255 HERE (train uses 0..255 float)
-        x_in = rgb.astype(np.float32)
-
-        m = cv2.resize(m, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
-        m01 = (m.astype(np.float32) / 255.0) > 0.5
-        m01 = m01.astype(np.float32)
+        # Ground truth uint8 برای Fan toolbox (0-255)
+        gt = cv2.resize(m, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
+        gt_uint8 = gt  # قبلاً 0-255 است
 
         x = np.expand_dims(x_in, axis=0)
-
         t0 = time.time()
-        pred = model.predict(x, verbose=0)[0, :, :, 0]  # prob in [0,1]
+        pred = model.predict(x, verbose=0)[0, :, :, 0]  # prob [0,1]
         total_time += (time.time() - t0)
 
         pred01 = pred
@@ -140,11 +167,14 @@ if __name__ == "__main__":
         if args.use_morphology:
             pred01 = apply_morphology(pred01)
 
-        # metrics
-        iou, dice, f, s, e, me, mae = compute_metrics_np(m01, pred01)
-        rows.append([name, iou, dice, f, s, e, me, mae])
+        # به uint8 برای Fan toolbox
+        pred_uint8 = (pred01 * 255).astype(np.uint8)
 
-        # save visualization (overlay prediction on original)
+        # Fan toolbox metrics
+        iou, dice, fwb, s, e, maxe, mae = compute_metrics_fan_toolbox(gt_uint8, pred_uint8)
+        rows.append([name, iou, dice, fwb, s, e, maxe, mae])
+
+        # visualization
         overlay = bgr.copy()
         overlay[pred01 > 0.5] = (0.3 * overlay[pred01 > 0.5] + 0.7 * np.array([0, 0, 255])).astype(np.uint8)
         cv2.imwrite(os.path.join(vis_dir, f"{name}_overlay.png"), overlay)
@@ -157,4 +187,4 @@ if __name__ == "__main__":
     print(df.mean(numeric_only=True))
     print(f"⏱ Avg inference time: {total_time / max(1, len(rows)):.4f} sec/image")
     print("-" * 40)
-    print("✅ Done.")
+    print("✅ Done. Used Fan toolbox!" if FAN_AVAILABLE else "⚠️ Used approximations (install PySegMetric).")
