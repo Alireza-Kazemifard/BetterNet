@@ -120,6 +120,9 @@ if __name__ == "__main__":
     callbacks = [
         ModelCheckpoint(model_path, verbose=1, save_best_only=True, monitor="val_loss"),
         CSVLogger(csv_path),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=15, min_lr=1e-7, verbose=1),
+        TensorBoard(log_dir='./logs'),
+        EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
     ]
 
     if args.early_stopping_patience and args.early_stopping_patience > 0:
